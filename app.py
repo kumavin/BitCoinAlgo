@@ -47,7 +47,6 @@ trader = st.session_state.trader
 
 # =========================================================
 # SAFE STATE MIGRATION
-# (prevents KeyError on upgraded fields)
 # =========================================================
 if trader.position and isinstance(trader.position, dict):
 
@@ -92,7 +91,6 @@ if not price:
     st.error("❌ Unable to fetch BTC price — trading paused")
     price = 0
 
-
 st.metric("Bitcoin Price (USD)", round(price, 2) if price else "N/A")
 
 
@@ -127,13 +125,33 @@ def apply_trailing_levels(side, entry_price):
 
 
 # =========================================================
+# DUPLICATE TRADE PROTECTION
+# =========================================================
+def same_trade_already_open(signal):
+    """
+    Prevent duplicate trades:
+    - LONG when already LONG
+    - SHORT when already SHORT
+    """
+    if not trader.position:
+        return False
+
+    side = trader.position["side"]
+
+    return (
+        (signal == "LONG" and side == "LONG") or
+        (signal == "SHORT" and side == "SHORT")
+    )
+
+
+# =========================================================
 # AUTO TRADING STRATEGY
 # =========================================================
 st.sidebar.subheader("🤖 Strategy Automation")
 
 auto_trading = st.sidebar.toggle(
     "Enable Auto Trading",
-    value=False
+    value=True  # enabled by default
 )
 
 position_size = st.sidebar.number_input(
@@ -149,40 +167,59 @@ if auto_trading:
 
     signal, sig_price = generate_signal()
 
-    # Strategy may return None if data unavailable
     if sig_price is None:
-        st.info("🤖 Strategy returned HOLD — waiting for valid data")
+        st.info("🤖 Strategy HOLD — waiting for valid data")
         signal = "HOLD"
 
     st.sidebar.write(f"Strategy Signal: **{signal}**")
 
-    # ---------- LONG ----------
+    # =====================================================
+    # IGNORE SAME-SIDE SIGNALS
+    # =====================================================
+    if same_trade_already_open(signal):
+        st.sidebar.write("⏸ Position already open — no action taken")
+        signal = "HOLD"
+
+    # =====================================================
+    # EXECUTE STATE-CHANGE ACTIONS ONLY
+    # =====================================================
+
+    # ---------- ENTER LONG ----------
     if signal == "LONG" and price:
 
-        if not trader.position or trader.position["side"] != "LONG":
-            trader.close_position(price)
-            trader.open_long(price, position_size)
-            apply_trailing_levels("LONG", price)
-            save_state(trader)
-            log_trade("AUTO_LONG", price, position_size, 0)
-            st.success("🤖 Auto-Trade: LONG opened")
+        trader.close_position(price)  # closes short if any
+        trader.open_long(price, position_size)
 
-    # ---------- SHORT ----------
+        apply_trailing_levels("LONG", price)
+        save_state(trader)
+
+        log_trade("AUTO_LONG", price, position_size, 0)
+
+        st.success("🤖 Auto-Trade: LONG opened")
+
+
+    # ---------- ENTER SHORT ----------
     elif signal == "SHORT" and price:
 
-        if not trader.position or trader.position["side"] != "SHORT":
-            trader.close_position(price)
-            trader.open_short(price, position_size)
-            apply_trailing_levels("SHORT", price)
-            save_state(trader)
-            log_trade("AUTO_SHORT", price, position_size, 0)
-            st.error("🤖 Auto-Trade: SHORT opened")
+        trader.close_position(price)
+        trader.open_short(price, position_size)
+
+        apply_trailing_levels("SHORT", price)
+        save_state(trader)
+
+        log_trade("AUTO_SHORT", price, position_size, 0)
+
+        st.error("🤖 Auto-Trade: SHORT opened")
+
 
     # ---------- EXIT ----------
     elif signal == "EXIT" and trader.position and price:
+
         pnl = trader.close_position(price)
         save_state(trader)
+
         log_trade("AUTO_EXIT", price, 0, pnl)
+
         st.warning(f"🤖 Auto-Exit — PnL ${round(pnl,2)}")
 
 
@@ -326,7 +363,6 @@ log_equity(portfolio_value)
 # =========================================================
 tabs = st.tabs(["📒 Trades", "📈 Equity", "⚠️ Drawdown"])
 
-
 with tabs[0]:
     trades = load_trades()
     if trades and len(trades) > 0:
@@ -334,7 +370,6 @@ with tabs[0]:
         st.dataframe(pd.DataFrame(trades))
     else:
         st.info("No trades yet")
-
 
 with tabs[1]:
     df = load_equity()
@@ -347,7 +382,6 @@ with tabs[1]:
         c2.metric("Sharpe Ratio", round(sharpe, 2))
     else:
         st.info("Equity curve will appear after logs accumulate")
-
 
 with tabs[2]:
     if df is not None:
